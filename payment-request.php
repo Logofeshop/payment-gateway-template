@@ -1,179 +1,560 @@
 <?php
+/**
+ * Requests for PHP
+ *
+ * Inspired by Requests for Python.
+ *
+ * Based on concepts from SimplePie_File, RequestCore and WP_Http.
+ *
+ * @package Requests
+ */
 
-$client_secret = "lfeKILJMFQVc3vXzW79B6TI5VKs8DFeT"; // This is a dummy value. Place your client_secret key here. You received it from Ecwid team in email when registering the app 
-//$cipher = "AES-128-CBC";     
-$iv = "abcdefghijklmnopqrstuvwx";// this can be generated random if you plan to store it for later but in this case e.g. openssl_random_pseudo_bytes($ivlen);
-$cipher = "aes-128-gcm";
-$ivlen = openssl_cipher_iv_length($cipher="AES-128-CBC");
-$tag = 0;
+/**
+ * Requests for PHP
+ *
+ * Inspired by Requests for Python.
+ *
+ * Based on concepts from SimplePie_File, RequestCore and WP_Http.
+ *
+ * @package Requests
+ */
+class Requests {
+	/**
+	 * POST method
+	 *
+	 * @var string
+	 */
+	const POST = 'POST';
 
-// If this is a payment request
+	/**
+	 * PUT method
+	 *
+	 * @var string
+	 */
+	const PUT = 'PUT';
 
-if (isset($_POST["data"])) {
+	/**
+	 * GET method
+	 *
+	 * @var string
+	 */
+	const GET = 'GET';
 
-// Functions to decrypt the payment request from Ecwid
+	/**
+	 * HEAD method
+	 *
+	 * @var string
+	 */
+	const HEAD = 'HEAD';
 
-  function getEcwidPayload($app_secret_key, $data) {
-    // Get the encryption key (16 first bytes of the app's client_secret key)
-    $encryption_key = substr($app_secret_key, 0, 16);
+	/**
+	 * DELETE method
+	 *
+	 * @var string
+	 */
+	const DELETE = 'DELETE';
 
-    // Decrypt payload
-    $json_data = aes_128_decrypt($encryption_key, $data);
+	/**
+	 * PATCH method
+	 *
+	 * @link http://tools.ietf.org/html/rfc5789
+	 * @var string
+	 */
+	const PATCH = 'PATCH';
 
-    // Decode json
-    $json_decoded = json_decode($json_data, true);
-    return $json_decoded;
-  }
+	/**
+	 * Current version of Requests
+	 *
+	 * @var string
+	 */
+	const VERSION = '1.6-dev';
 
-  function aes_128_decrypt($key, $data) {
-    // Ecwid sends data in url-safe base64. Convert the raw data to the original base64 first
-    $base64_original = str_replace(array('-', '_'), array('+', '/'), $data);
+	/**
+	 * Registered transport classes
+	 *
+	 * @var array
+	 */
+	protected static $transports = array();
 
-    // Get binary data
-    $decoded = base64_decode($base64_original);
+	/**
+	 * Selected transport name
+	 *
+	 * Use {@see get_transport()} instead
+	 *
+	 * @var string|null
+	 */
+	public static $transport = null;
 
-    // Initialization vector is the first 16 bytes of the received data
-    $iv = substr($decoded, 0, 16);
+	/**
+	 * This is a static class, do not instantiate it
+	 *
+	 * @codeCoverageIgnore
+	 */
+	private function __construct() {}
 
-    // The payload itself is is the rest of the received data
-    $payload = substr($decoded, 16);
+	/**
+	 * Autoloader for Requests
+	 *
+	 * Register this with {@see register_autoloader()} if you'd like to avoid
+	 * having to create your own.
+	 *
+	 * (You can also use `spl_autoload_register` directly if you'd prefer.)
+	 *
+	 * @codeCoverageIgnore
+	 *
+	 * @param string $class Class name to load
+	 */
+	public static function autoloader($class) {
+		// Check that the class starts with "Requests"
+		if (strpos($class, 'Requests') !== 0) {
+			return;
+		}
 
-    // Decrypt raw binary payload
-    $json = openssl_decrypt($payload, "aes-128-cbc", $key, OPENSSL_RAW_DATA, $iv);
-    //$json = mcrypt_decrypt(MCRYPT_RIJNDAEL_128, $key, $payload, MCRYPT_MODE_CBC, $iv); // You can use this instead of openssl_decrupt, if mcrypt is enabled in your system
+		$file = str_replace('_', '/', $class);
+		if (file_exists(dirname(__FILE__) . '/' . $file . '.php')) {
+			require_once(dirname(__FILE__) . '/' . $file . '.php');
+		}
+	}
 
-    return $json;
-  }
+	/**
+	 * Register the built-in autoloader
+	 *
+	 * @codeCoverageIgnore
+	 */
+	public static function register_autoloader() {
+		spl_autoload_register(array('Requests', 'autoloader'));
+	}
 
-  // Get payload from the POST and decrypt it
-  $ecwid_payload = $_POST['data'];
+	/**
+	 * Register a transport
+	 *
+	 * @param string $transport Transport class to add, must support the Requests_Transport interface
+	 */
+	public static function add_transport($transport) {
+		if (empty(self::$transports)) {
+			self::$transports = array(
+				'Requests_Transport_cURL',
+				'Requests_Transport_fsockopen',
+			);
+		}
 
-  // The resulting JSON from payment request will be in $order variable
-  $order = getEcwidPayload($client_secret, $ecwid_payload);
+		self::$transports = array_merge(self::$transports, array($transport));
+	}
 
-  // Debug preview of the request decoded earlier
-  echo "<h3>REQUEST DETAILS</h3>";
+	/**
+	 * Get a working transport
+	 *
+	 * @throws Requests_Exception If no valid transport is found (`notransport`)
+	 * @return Requests_Transport
+	 */
+	protected static function get_transport() {
+		// Caching code, don't bother testing coverage
+		// @codeCoverageIgnoreStart
+		if (self::$transport !== null) {
+			return new self::$transport();
+		}
+		// @codeCoverageIgnoreEnd
 
-      // Account info from merchant app settings in app interface in Ecwid CP
-      $x_account_id = $order['merchantAppSettings']['merchantId'];
-      $api_key = $order['merchantAppSettings']['apiKey'];
+		if (empty(self::$transports)) {
+			self::$transports = array(
+				'Requests_Transport_cURL',
+				'Requests_Transport_fsockopen',
+			);
+		}
 
-      // OPTIONAL: Split name field into two fields: first name and last name
-      $fullName = explode(" ", $order["cart"]["order"]["billingPerson"]["name"]);
-      $firstName = $fullName[0]; $lastName = $fullName[1];
+		// Find us a working transport
+		foreach (self::$transports as $class) {
+			if (!class_exists($class))
+				continue;
 
-      // Encode access token and prepare calltack URL template
-      $ciphertext_raw = openssl_encrypt($order['token'],$cipher, $client_secret,$options=0,$iv,$tag);
-      $callbackPayload = base64_encode( $ciphertext_raw);
-      $callbackUrl = "https://$_SERVER[HTTP_HOST]$_SERVER[REQUEST_URI]"."?storeId=".$order['storeId']."&orderNumber=".$order['cart']['order']['orderNumber']."&callbackPayload=".$callbackPayload;
+			$result = call_user_func(array($class, 'test'));
+			if ($result) {
+				self::$transport = $class;
+				break;
+			}
+		}
+		if (self::$transport === null) {
+			throw new Requests_Exception('No working transports found', 'notransport', self::$transports);
+		}
 
-      // Request parameters to pass into payment gateway
-      $request = array(
-        "x_account_id" => $x_account_id,
-        "x_api_key" => $api_key,
-        "x_amount" => $order["cart"]["order"]["total"],
-        "x_currency" => $order["cart"]["currency"],
-        "x_customer_billing_address1" => str_replace(PHP_EOL, ' ' , $order["cart"]["order"]["billingPerson"]["street"]),
-        "x_customer_billing_city" => $order["cart"]["order"]["billingPerson"]["city"],
-        "x_customer_billing_country" => $order["cart"]["order"]["billingPerson"]["countryCode"],
-        "x_customer_billing_state" => $order["cart"]["order"]["billingPerson"]["stateOrProvinceCode"],
-        "x_customer_billing_postcode" => $order["cart"]["order"]["billingPerson"]["postalCode"],
-        "x_customer_email" => $order["cart"]["order"]["email"],
-        "x_customer_first_name" => $firstName,
-        "x_customer_last_name" => $lastName,
-        "x_customer_phone" => $order["cart"]["order"]["billingPerson"]["phone"],
-        "x_customer_shipping_address1" => str_replace(PHP_EOL, ' ', $order["cart"]["order"]["shippingPerson"]["street"]),
-        "x_customer_shipping_city" => $order["cart"]["order"]["shippingPerson"]["city"],
-        "x_customer_shipping_country" => $order["cart"]["order"]["shippingPerson"]["countryCode"],
-        "x_customer_shipping_state" => $order["cart"]["order"]["shippingPerson"]["stateOrProvinceCode"],
-        "x_customer_shipping_postcode" => $order["cart"]["order"]["shippingPerson"]["postalCode"],
-        "x_customer_shipping_phone" => $order["cart"]["order"]["shippingPerson"]["phone"],
-        "x_description" => "Order number". $order['cart']['order']['referenceTransactionId'],
-        "x_reference" => $order['cart']['order']['referenceTransactionId'],
-        "x_url_success" => $callbackUrl."&status=PAID",
-        "x_url_error" => $callbackUrl."&status=CANCELLED",
-        "x_url_cancel" => $order["returnUrl"]
-      );
+		return new self::$transport();
+	}
 
-        // Sign the payment request
-        $signature = payment_sign($request,$api_key);
-        $request["x_signature"] = $signature;
+	/**#@+
+	 * @see request()
+	 * @param string $url
+	 * @param array $headers
+	 * @param array $options
+	 * @return Requests_Response
+	 */
+	/**
+	 * Send a GET request
+	 */
+	public static function get($url, $headers = array(), $options = array()) {
+		return self::request($url, $headers, null, self::GET, $options);
+	}
 
-        // Print the request variables to debug
-        echo "<br/>";
-        foreach ($request as $name => $value) {
-          echo "$name: $value<br/>";
-        }
-        echo "<br/>";
+	/**
+	 * Send a HEAD request
+	 */
+	public static function head($url, $headers = array(), $options = array()) {
+		return self::request($url, $headers, null, self::HEAD, $options);
+	}
 
-        // Print form on a page to submit it from a button press
-        echo "<form action='https://example.paymentpage.com/checkout' method='post' id='payment_form'>";
-            foreach ($request as $name => $value) {
-                echo "<input type='hidden' name='$name' value='$value'></input>";
-            }
-        echo "<input type='submit' value='Submit'>";    
-        echo "</form>";
-        echo "<script>document.querySelector('#payment_form).submit();</script>";
+	/**
+	 * Send a DELETE request
+	 */
+	public static function delete($url, $headers = array(), $options = array()) {
+		return self::request($url, $headers, null, self::DELETE, $options);
+	}
+	/**#@-*/
 
+	/**#@+
+	 * @see request()
+	 * @param string $url
+	 * @param array $headers
+	 * @param array $data
+	 * @param array $options
+	 * @return Requests_Response
+	 */
+	/**
+	 * Send a POST request
+	 */
+	public static function post($url, $headers = array(), $data = array(), $options = array()) {
+		return self::request($url, $headers, $data, self::POST, $options);
+	}
+	/**
+	 * Send a PUT request
+	 */
+	public static function put($url, $headers = array(), $data = array(), $options = array()) {
+		return self::request($url, $headers, $data, self::PUT, $options);
+	}
+
+	/**
+	 * Send a PATCH request
+	 *
+	 * Note: Unlike {@see post} and {@see put}, `$headers` is required, as the
+	 * specification recommends that should send an ETag
+	 *
+	 * @link http://tools.ietf.org/html/rfc5789
+	 */
+	public static function patch($url, $headers, $data = array(), $options = array()) {
+		return self::request($url, $headers, $data, self::PATCH, $options);
+	}
+	/**#@-*/
+
+	/**
+	 * Main interface for HTTP requests
+	 *
+	 * This method initiates a request and sends it via a transport before
+	 * parsing.
+	 *
+	 * The `$options` parameter takes an associative array with the following
+	 * options:
+	 *
+	 * - `timeout`: How long should we wait for a response?
+	 *    (integer, seconds, default: 10)
+	 * - `useragent`: Useragent to send to the server
+	 *    (string, default: php-requests/$version)
+	 * - `follow_redirects`: Should we follow 3xx redirects?
+	 *    (boolean, default: true)
+	 * - `redirects`: How many times should we redirect before erroring?
+	 *    (integer, default: 10)
+	 * - `blocking`: Should we block processing on this request?
+	 *    (boolean, default: true)
+	 * - `filename`: File to stream the body to instead.
+	 *    (string|boolean, default: false)
+	 * - `auth`: Authentication handler or array of user/password details to use
+	 *    for Basic authentication
+	 *    (Requests_Auth|array|boolean, default: false)
+	 * - `idn`: Enable IDN parsing
+	 *    (boolean, default: true)
+	 * - `transport`: Custom transport. Either a class name, or a
+	 *    transport object. Defaults to the first working transport from
+	 *    {@see getTransport()}
+	 *    (string|Requests_Transport, default: {@see getTransport()})
+	 *
+	 * @throws Requests_Exception On invalid URLs (`nonhttp`)
+	 *
+	 * @param string $url URL to request
+	 * @param array $headers Extra headers to send with the request
+	 * @param array $data Data to send either as a query string for GET/HEAD requests, or in the body for POST requests
+	 * @param string $type HTTP request type (use Requests constants)
+	 * @param array $options Options for the request (see description for more information)
+	 * @return Requests_Response
+	 */
+	public static function request($url, $headers = array(), $data = array(), $type = self::GET, $options = array()) {
+		if (!preg_match('/^http(s)?:\/\//i', $url)) {
+			throw new Requests_Exception('Only HTTP requests are handled.', 'nonhttp', $url);
+		}
+		$defaults = array(
+			'timeout' => 10,
+			'useragent' => 'php-requests/' . self::VERSION,
+			'redirected' => 0,
+			'redirects' => 10,
+			'follow_redirects' => true,
+			'blocking' => true,
+			'type' => $type,
+			'filename' => false,
+			'auth' => false,
+			'idn' => true,
+			'hooks' => null,
+			'transport' => null,
+		);
+		$options = array_merge($defaults, $options);
+
+		if (empty($options['hooks'])) {
+			$options['hooks'] = new Requests_Hooks();
+		}
+
+		// Special case for simple basic auth
+		if (is_array($options['auth'])) {
+			$options['auth'] = new Requests_Auth_Basic($options['auth']);
+		}
+		if ($options['auth'] !== false) {
+			$options['auth']->register($options['hooks']);
+		}
+
+		$options['hooks']->dispatch('requests.before_request', array(&$url, &$headers, &$data, &$type, &$options));
+
+		if ($options['idn'] !== false) {
+			$iri = new Requests_IRI($url);
+			$iri->host = Requests_IDNAEncoder::encode($iri->ihost);
+			$url = $iri->uri;
+		}
+
+		if (!empty($options['transport'])) {
+			$transport = $options['transport'];
+
+			if (is_string($options['transport'])) {
+				$transport = new $transport();
+			}
+		}
+		else {
+			$transport = self::get_transport();
+		}
+		$response = $transport->request($url, $headers, $data, $options);
+
+		$options['hooks']->dispatch('requests.before_parse', array(&$response, $url, $headers, $data, $type, $options));
+
+		return self::parse_response($response, $url, $headers, $data, $options);
+	}
+
+	/**
+	 * HTTP response parser
+	 *
+	 * @throws Requests_Exception On missing head/body separator (`requests.no_crlf_separator`)
+	 * @throws Requests_Exception On missing head/body separator (`noversion`)
+	 * @throws Requests_Exception On missing head/body separator (`toomanyredirects`)
+	 *
+	 * @param string $headers Full response text including headers and body
+	 * @param string $url Original request URL
+	 * @param array $req_headers Original $headers array passed to {@link request()}, in case we need to follow redirects
+	 * @param array $req_data Original $data array passed to {@link request()}, in case we need to follow redirects
+	 * @param array $options Original $options array passed to {@link request()}, in case we need to follow redirects
+	 * @return Requests_Response
+	 */
+	protected static function parse_response($headers, $url, $req_headers, $req_data, $options) {
+		$return = new Requests_Response();
+		if (!$options['blocking']) {
+			return $return;
+		}
+
+		$return->raw = $headers;
+		$return->url = $url;
+
+		if (!$options['filename']) {
+			if (strpos($headers, "\r\n\r\n") === false) {
+				// Crap!
+				throw new Requests_Exception('Missing header/body separator', 'requests.no_crlf_separator');
+			}
+
+			$headers = explode("\r\n\r\n", $headers, 2);
+			$return->body = array_pop($headers);
+			$headers = $headers[0];
+		}
+		else {
+			$return->body = '';
+		}
+		// Pretend CRLF = LF for compatibility (RFC 2616, section 19.3)
+		$headers = str_replace("\r\n", "\n", $headers);
+		// Unfold headers (replace [CRLF] 1*( SP | HT ) with SP) as per RFC 2616 (section 2.2)
+		$headers = preg_replace('/\n[ \t]/', ' ', $headers);
+		$headers = explode("\n", $headers);
+		preg_match('#^HTTP/1\.\d[ \t]+(\d+)#i', array_shift($headers), $matches);
+		if (empty($matches)) {
+			throw new Requests_Exception('Response could not be parsed', 'noversion', $headers);
+		}
+		$return->status_code = (int) $matches[1];
+		if ($return->status_code >= 200 && $return->status_code < 300) {
+			$return->success = true;
+		}
+
+		foreach ($headers as $header) {
+			list($key, $value) = explode(':', $header, 2);
+			$value = trim($value);
+			preg_replace('#(\s+)#i', ' ', $value);
+			$return->headers[$key] = $value;
+		}
+		if (isset($return->headers['transfer-encoding'])) {
+			$return->body = self::decode_chunked($return->body);
+			unset($return->headers['transfer-encoding']);
+		}
+		if (isset($return->headers['content-encoding'])) {
+			$return->body = self::decompress($return->body);
+		}
+
+		//fsockopen and cURL compatibility
+		if (isset($return->headers['connection'])) {
+			unset($return->headers['connection']);
+		}
+
+		if ((in_array($return->status_code, array(300, 301, 302, 303, 307)) || $return->status_code > 307 && $return->status_code < 400) && $options['follow_redirects'] === true) {
+			if (isset($return->headers['location']) && $options['redirected'] < $options['redirects']) {
+				if ($return->status_code === 303) {
+					$options['type'] = Requests::GET;
+				}
+				$options['redirected']++;
+				$location = $return->headers['location'];
+				if (strpos ($location, '/') === 0) {
+					// relative redirect, for compatibility make it absolute
+					$location = Requests_IRI::absolutize($url, $location);
+				}
+				$redirected = self::request($location, $req_headers, $req_data, false, $options);
+				$redirected->history[] = $return;
+				return $redirected;
+			}
+			elseif ($options['redirected'] >= $options['redirects']) {
+				throw new Requests_Exception('Too many redirects', 'toomanyredirects', $return);
+			}
+		}
+
+		$return->redirects = $options['redirected'];
+
+		$options['hooks']->dispatch('requests.after_request', array(&$return, $req_headers, $req_data, $options));
+		return $return;
+	}
+
+	/**
+	 * Decoded a chunked body as per RFC 2616
+	 *
+	 * @see http://tools.ietf.org/html/rfc2616#section-3.6.1
+	 * @param string $data Chunked body
+	 * @return string Decoded body
+	 */
+	protected static function decode_chunked($data) {
+		if (!preg_match('/^([0-9a-f]+)[^\r\n]*\r\n/i', trim($data))) {
+			return $data;
+		}
+
+		$decoded = '';
+		$encoded = $data;
+
+		while (true) {
+			$is_chunked = (bool) preg_match( '/^([0-9a-f]+)[^\r\n]*\r\n/i', $encoded, $matches );
+			if (!$is_chunked) {
+				// Looks like it's not chunked after all
+				return $data;
+			}
+
+			$length = hexdec(trim($matches[1]));
+			if ($length === 0) {
+				// Ignore trailer headers
+				return $decoded;
+			}
+
+			$chunk_length = strlen($matches[0]);
+			$decoded .= $part = substr($encoded, $chunk_length, $length);
+			$encoded = substr($encoded, $chunk_length + $length + 2);
+
+			if (trim($encoded) === '0' || empty($encoded)) {
+				return $decoded;
+			}
+		}
+
+		// We'll never actually get down here
+		// @codeCoverageIgnoreStart
+	}
+	// @codeCoverageIgnoreEnd
+
+	/**
+	 * Convert a key => value array to a 'key: value' array for headers
+	 *
+	 * @param array $array Dictionary of header values
+	 * @return array List of headers
+	 */
+	public static function flattern($array) {
+		$return = array();
+		foreach ($array as $key => $value) {
+			$return[] = "$key: $value";
+		}
+		return $return;
+	}
+
+	/**
+	 * Decompress an encoded body
+	 *
+	 * Implements gzip, compress and deflate. Guesses which it is by attempting
+	 * to decode.
+	 *
+	 * @todo Make this smarter by defaulting to whatever the headers say first
+	 * @param string $data Compressed data in one of the above formats
+	 * @return string Decompressed string
+	 */
+	protected static function decompress($data) {
+		if (substr($data, 0, 2) !== "\x1f\x8b") {
+			// Not actually compressed. Probably cURL ruining this for us.
+			return $data;
+		}
+
+		if (function_exists('gzdecode') && ($decoded = gzdecode($data)) !== false) {
+			return $decoded;
+		}
+		elseif (function_exists('gzinflate') && ($decoded = @gzinflate($data)) !== false) {
+			return $decoded;
+		}
+		elseif (($decoded = self::compatible_gzinflate($data)) !== false) {
+			return $decoded;
+		}
+		elseif (function_exists('gzuncompress') && ($decoded = @gzuncompress($data)) !== false) {
+			return $decoded;
+		}
+
+		return $data;
+	}
+
+	/**
+	 * Decompress deflated string while staying compatible with the majority of servers.
+	 *
+	 * Certain servers will return deflated data with headers which PHP's gziniflate()
+	 * function cannot handle out of the box. The following function lifted from
+	 * http://au2.php.net/manual/en/function.gzinflate.php#77336 will attempt to deflate
+	 * the various return forms used.
+	 *
+	 * @link http://au2.php.net/manual/en/function.gzinflate.php#77336
+	 *
+	 * @param string $gzData String to decompress.
+	 * @return string|bool False on failure.
+	 */
+	protected static function compatible_gzinflate($gzData) {
+		if ( substr($gzData, 0, 3) == "\x1f\x8b\x08" ) {
+			$i = 10;
+			$flg = ord( substr($gzData, 3, 1) );
+			if ( $flg > 0 ) {
+				if ( $flg & 4 ) {
+					list($xlen) = unpack('v', substr($gzData, $i, 2) );
+					$i = $i + 2 + $xlen;
+				}
+				if ( $flg & 8 )
+					$i = strpos($gzData, "\0", $i) + 1;
+				if ( $flg & 16 )
+					$i = strpos($gzData, "\0", $i) + 1;
+				if ( $flg & 2 )
+					$i = $i + 2;
+			}
+			return gzinflate( substr($gzData, $i, -8) );
+		} else {
+			return false;
+		}
+	}
 }
-
-      // Function to sign the payment request form
-      function payment_sign($query, $api_key) {
-            $clear_text = '';
-            ksort($query);
-            foreach ($query as $key => $value) {
-                if (substr($key, 0, 2) === "x_") {
-                    $clear_text .= $key . $value;
-                }
-            }
-            $hash = hash_hmac("sha256", $clear_text, $api_key);
-            return str_replace('-', '', $hash);
-      }
-
-
-// If we are returning back to storefront. Callback from payment
-
-if (isset($_GET["callbackPayload"]) && isset($_GET["status"])) {
-
-    // Set variables
-    $client_id = "test-rick-payment-template";
-    $c = base64_decode($_GET['callbackPayload']);
-    $token = openssl_decrypt($c, $cipher, $client_secret, $options=0, $iv,$tag);
-    $storeId = $_GET['storeId'];
-    $orderNumber = $_GET['orderNumber'];
-    $status = $_GET['status'];
-    $returnUrl = "https://app.ecwid.com/custompaymentapps/$storeId?orderId=$orderNumber&clientId=$client_id";
-
-    // Prepare request body for updating the order
-    $json = json_encode(array(
-        "paymentStatus" => $status,
-        "externalTransactionId" => "transaction_".$orderNumber
-    ));
-
-    // URL used to update the order via Ecwid REST API
-    $url = "https://app.ecwid.com/api/v3/$storeId/orders/transaction_$orderNumber?token=$token";
-  
-    // Send request to update order
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, array('Content-Type: application/json','Content-Length: ' . strlen($json)));
-    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'PUT');
-    curl_setopt($ch, CURLOPT_POSTFIELDS,$json);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    $response = curl_exec($ch);
-    curl_close($ch);
-
-    // return customer back to storefront
-    echo "<script>window.location = '$returnUrl'</script>";
-
-}
-
-else { 
-
-  header('HTTP/1.0 403 Forbidden');
-  echo 'Access forbidden!';
-
-}
-
-
-?>
